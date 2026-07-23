@@ -1,292 +1,436 @@
-"""
-FIFA World Cup 2026 - Player Performance Dashboard
----------------------------------------------------
-An interactive Streamlit app for exploring player and team performance
-data from the FIFA World Cup 2026.
-
-Run with:
-    streamlit run app.py
-"""
-
-from __future__ import annotations
-
+import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
-from src import analysis, data_loader
-
+# ----------------------------------------------------------------------------
+# PAGE CONFIG
+# ----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="FIFA World Cup 2026 - Player Performance",
+    page_title="World Cup 2026 — Player Stats Dashboard",
     page_icon="⚽",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-# ---------------------------------------------------------------------------
-# Data loading (cached so the CSV is only parsed once per session)
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# STYLING
+# ----------------------------------------------------------------------------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;800&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.stApp {
+    background: radial-gradient(circle at 10% 0%, #0f1b3d 0%, #0a1128 45%, #060a1a 100%);
+    color: #f4f6fb;
+}
+section[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #0d1a3e 0%, #0a1230 100%);
+    border-right: 1px solid rgba(255,255,255,0.06);
+}
+h1, h2, h3, h4 { color: #ffffff !important; font-weight: 800 !important; }
+.hero {
+    padding: 1.6rem 2rem; border-radius: 18px;
+    background: linear-gradient(120deg, #12224f 0%, #1a2f6b 45%, #2a3f8f 100%);
+    border: 1px solid rgba(255,255,255,0.08);
+    margin-bottom: 1.4rem;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+}
+.hero h1 { font-size: 2.1rem; margin: 0; letter-spacing: -0.5px; }
+.hero p { color: #b9c4e6; margin: 0.3rem 0 0 0; font-size: 1.02rem; }
+.kpi-card {
+    background: linear-gradient(145deg, #101c42 0%, #16234f 100%);
+    border: 1px solid rgba(255,255,255,0.08); border-radius: 16px;
+    padding: 1.1rem 1.3rem; box-shadow: 0 6px 20px rgba(0,0,0,0.3);
+    transition: transform 0.15s ease;
+}
+.kpi-card:hover { transform: translateY(-3px); border-color: rgba(255,215,0,0.35); }
+.kpi-label { color: #93a1c9; font-size: 0.78rem; text-transform: uppercase; letter-spacing: 1px; font-weight: 600; }
+.kpi-value { color: #ffffff; font-size: 1.35rem; font-weight: 800; margin-top: 0.15rem; }
+.stTabs [data-baseweb="tab-list"] { gap: 6px; background: transparent; }
+.stTabs [data-baseweb="tab"] {
+    background: #101c42; border-radius: 10px 10px 0 0; color: #b9c4e6;
+    font-weight: 600; padding: 10px 18px; border: 1px solid rgba(255,255,255,0.06);
+}
+.stTabs [aria-selected="true"] {
+    background: linear-gradient(120deg,#2a3f8f,#3d5bd9) !important; color: white !important;
+}
+.player-card {
+    background: linear-gradient(145deg, #101c42 0%, #182a5c 100%);
+    border: 1px solid rgba(255,215,0,0.25); border-radius: 16px;
+    padding: 1.2rem 1.4rem; box-shadow: 0 8px 24px rgba(0,0,0,0.35);
+}
+hr { border-color: rgba(255,255,255,0.08); }
+::-webkit-scrollbar { width: 10px; }
+::-webkit-scrollbar-track { background: #0a1128; }
+::-webkit-scrollbar-thumb { background: #2a3f8f; border-radius: 10px; }
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_data(show_spinner="Loading match data...")
-def get_raw_data() -> pd.DataFrame:
-    df = data_loader.load_raw_data()
-    return data_loader.clean_data(df)
+# ----------------------------------------------------------------------------
+# DATA LOADING & CLEANING
+# ----------------------------------------------------------------------------
+@st.cache_data
+def load_data():
+    df = pd.read_csv("data.csv")
 
+    # age is stored as "YY-DDD" (years-days) -> convert to a clean float
+    def parse_age(a):
+        if pd.isna(a):
+            return np.nan
+        s = str(a)
+        if "-" in s:
+            y, d = s.split("-")
+            try:
+                return round(int(y) + int(d) / 365, 1)
+            except ValueError:
+                return np.nan
+        try:
+            return float(s)
+        except ValueError:
+            return np.nan
 
-@st.cache_data(show_spinner="Building player summaries...")
-def get_summary(raw: pd.DataFrame) -> pd.DataFrame:
-    return data_loader.build_player_tournament_summary(raw)
+    df["age_years"] = df["age"].apply(parse_age)
 
+    # primary position = first listed position (players can have multiple, e.g. "FW,MF")
+    df["position_primary"] = df["position"].fillna("Unknown").apply(lambda x: x.split(",")[0])
+    df["is_goalkeeper"] = df["position_primary"] == "GK"
 
-raw_df = get_raw_data()
-full_summary = get_summary(raw_df)
+    # fill numeric NaNs with 0 for aggregate-friendly stats (outfield metrics only)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    fill_zero_cols = [c for c in numeric_cols if not c.startswith("gk_") and c not in
+                       ["shots_on_target_pct", "goals_per_shot", "goals_per_shot_on_target",
+                        "minutes_per_start", "minutes_per_sub", "plus_minus_wowy", "points_per_game", "minutes_pct"]]
+    df[fill_zero_cols] = df[fill_zero_cols].fillna(0)
 
-# ---------------------------------------------------------------------------
-# Sidebar filters
-# ---------------------------------------------------------------------------
+    df["club"] = df["club"].fillna("Unattached / Not listed")
 
-st.sidebar.title("⚽ Filters")
+    # a few players share the same name across different teams (e.g. two
+    # different "Emiliano Martínez") -> build an unambiguous display label
+    dupe_names = df["player"][df["player"].duplicated(keep=False)].unique()
+    df["player_label"] = np.where(
+        df["player"].isin(dupe_names),
+        df["player"] + " (" + df["team"] + ")",
+        df["player"]
+    )
+    return df
 
-teams = sorted(full_summary["team"].unique())
-selected_teams = st.sidebar.multiselect("Team(s)", teams, default=[])
+df = load_data()
 
-positions = sorted(full_summary["position"].unique())
-selected_positions = st.sidebar.multiselect("Position(s)", positions, default=[])
+# ----------------------------------------------------------------------------
+# SIDEBAR — FILTERS
+# ----------------------------------------------------------------------------
+st.sidebar.markdown("## ⚽ Filters")
+st.sidebar.markdown("Refine the player pool across the sidebar filters below.")
 
-stages = sorted(raw_df["tournament_stage"].unique(), key=lambda s: raw_df.loc[raw_df["tournament_stage"] == s, "match_date"].min())
-selected_stages = st.sidebar.multiselect("Tournament stage(s)", stages, default=[])
+teams = st.sidebar.multiselect("Team (Nation)", sorted(df["team"].unique()))
+positions = st.sidebar.multiselect("Position", sorted(df["position_primary"].unique()))
 
-age_min, age_max = int(full_summary["age"].min()), int(full_summary["age"].max())
-age_range = st.sidebar.slider("Age range", age_min, age_max, (age_min, age_max))
+age_min = int(np.floor(df["age_years"].min(skipna=True)))
+age_max = int(np.ceil(df["age_years"].max(skipna=True)))
+age_range = st.sidebar.slider("Age Range", age_min, age_max, (age_min, age_max))
 
-min_matches = st.sidebar.slider("Minimum matches played", 1, int(full_summary["matches_played"].max()), 1)
+min_minutes = st.sidebar.slider("Minimum Minutes Played", 0, int(df["minutes"].max()), 0, step=10)
+only_starters = st.sidebar.checkbox("Only players with at least 1 start", value=False)
+
+search_name = st.sidebar.text_input("🔍 Search Player Name")
 
 st.sidebar.markdown("---")
-st.sidebar.caption(
-    "Data: FIFA World Cup 2026 player performance dataset "
-    f"({raw_df.shape[0]:,} match rows, {full_summary.shape[0]:,} players, "
-    f"{full_summary['team'].nunique()} teams)."
-)
+st.sidebar.caption(f"Dataset: {df['player'].nunique():,} players · {df['team'].nunique()} teams · {df['club'].nunique()} clubs")
 
-# ---------------------------------------------------------------------------
-# Apply filters
-# ---------------------------------------------------------------------------
+fdf = df.copy()
+if teams:
+    fdf = fdf[fdf["team"].isin(teams)]
+if positions:
+    fdf = fdf[fdf["position_primary"].isin(positions)]
+fdf = fdf[(fdf["age_years"] >= age_range[0]) & (fdf["age_years"] <= age_range[1]) | fdf["age_years"].isna()]
+fdf = fdf[fdf["minutes"].fillna(0) >= min_minutes]
+if only_starters:
+    fdf = fdf[fdf["games_starts"] > 0]
+if search_name:
+    fdf = fdf[fdf["player"].str.contains(search_name, case=False, na=False)]
 
-filtered_raw = raw_df.copy()
-if selected_teams:
-    filtered_raw = filtered_raw[filtered_raw["team"].isin(selected_teams)]
-if selected_stages:
-    filtered_raw = filtered_raw[filtered_raw["tournament_stage"].isin(selected_stages)]
-
-filtered_summary = data_loader.build_player_tournament_summary(filtered_raw) if len(filtered_raw) else full_summary.iloc[0:0]
-
-if selected_positions:
-    filtered_summary = filtered_summary[filtered_summary["position"].isin(selected_positions)]
-filtered_summary = filtered_summary[
-    (filtered_summary["age"] >= age_range[0])
-    & (filtered_summary["age"] <= age_range[1])
-    & (filtered_summary["matches_played"] >= min_matches)
-]
-
-# Keep raw rows in sync with the filtered player set, for charts that need match-level detail.
-filtered_raw = filtered_raw[filtered_raw["player_id"].isin(filtered_summary["player_id"])]
-
-# ---------------------------------------------------------------------------
-# Header + KPIs
-# ---------------------------------------------------------------------------
-
-st.title("⚽ FIFA World Cup 2026 — Player Performance Dashboard")
-st.caption("Explore player and team performance across the tournament. Use the sidebar to filter by team, position, stage, and age.")
-
-if filtered_summary.empty:
-    st.warning("No players match the current filters. Try widening your selection.")
+if fdf.empty:
+    st.warning("No players match your filters. Try widening your selection.")
     st.stop()
 
-kpi_cols = st.columns(5)
-kpi_cols[0].metric("Players", f"{filtered_summary['player_id'].nunique():,}")
-kpi_cols[1].metric("Teams", f"{filtered_summary['team'].nunique():,}")
-kpi_cols[2].metric("Total Goals", f"{int(filtered_summary['goals'].sum()):,}")
-kpi_cols[3].metric("Total Assists", f"{int(filtered_summary['assists'].sum()):,}")
-kpi_cols[4].metric("Avg. Rating", f"{filtered_summary['player_rating'].mean():.2f}")
+# ----------------------------------------------------------------------------
+# HERO HEADER
+# ----------------------------------------------------------------------------
+st.markdown("""
+<div class="hero">
+    <h1>🏆 World Cup 2026 — Player Stats Dashboard</h1>
+    <p>Explore goals, assists, discipline, and advanced per-90 metrics for every player and team in the tournament.</p>
+</div>
+""", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------------
+# KPI ROW
+# ----------------------------------------------------------------------------
+total_goals = int(fdf["goals"].sum())
+total_assists = int(fdf["assists"].sum())
+avg_age = fdf["age_years"].mean()
+top_scorer = fdf.loc[fdf["goals"].idxmax()]
+n_players = fdf["player"].nunique()
+n_teams = fdf["team"].nunique()
+
+k1, k2, k3, k4, k5 = st.columns(5)
+kpis = [
+    (k1, "⚽ Total Goals", f"{total_goals:,}"),
+    (k2, "🎯 Total Assists", f"{total_assists:,}"),
+    (k3, "🎂 Avg Age", f"{avg_age:.1f} yrs"),
+    (k4, "👑 Top Scorer", f"{top_scorer['goals']:.0f} — {top_scorer['player']}"),
+    (k5, "🌍 Players / Teams", f"{n_players:,} / {n_teams}"),
+]
+for col, label, value in kpis:
+    with col:
+        st.markdown(f"""
+        <div class="kpi-card">
+            <div class="kpi-label">{label}</div>
+            <div class="kpi-value">{value}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+st.markdown("<br>", unsafe_allow_html=True)
+
+# ----------------------------------------------------------------------------
+# TABS
+# ----------------------------------------------------------------------------
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📈 Overview", "🧑‍💼 Player Explorer", "🌍 Team Comparison",
+    "🥇 Leaderboards", "🧤 Goalkeepers & Radar"
+])
+
+COLOR_SEQ = px.colors.qualitative.Vivid
+TEMPLATE = "plotly_dark"
+
+def style_fig(fig, height=420):
+    fig.update_layout(
+        template=TEMPLATE, paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="Inter", color="#f4f6fb"), height=height,
+        margin=dict(l=10, r=10, t=50, b=10), legend=dict(bgcolor="rgba(0,0,0,0)"),
+    )
+    return fig
+
+# ---------------- TAB 1: OVERVIEW ----------------
+with tab1:
+    c1, c2 = st.columns(2)
+    with c1:
+        top_teams_goals = fdf.groupby("team")["goals"].sum().sort_values(ascending=False).head(12)
+        fig = px.bar(top_teams_goals, x=top_teams_goals.values, y=top_teams_goals.index, orientation="h",
+                     title="Top 12 Teams by Total Goals", labels={"x": "Goals", "y": ""},
+                     color=top_teams_goals.values, color_continuous_scale="Sunsetdark")
+        fig.update_yaxes(categoryorder="total ascending")
+        st.plotly_chart(style_fig(fig), use_container_width=True)
+
+    with c2:
+        pos_dist = fdf["position_primary"].value_counts()
+        fig = px.pie(pos_dist, values=pos_dist.values, names=pos_dist.index, hole=0.5,
+                     title="Squad Composition by Position", color_discrete_sequence=COLOR_SEQ)
+        st.plotly_chart(style_fig(fig), use_container_width=True)
+
+    c3, c4 = st.columns(2)
+    with c3:
+        fig = px.histogram(fdf, x="age_years", nbins=20, title="Age Distribution",
+                            color_discrete_sequence=["#4fd1c5"])
+        fig.update_layout(bargap=0.05)
+        st.plotly_chart(style_fig(fig), use_container_width=True)
+
+    with c4:
+        scat = fdf[fdf["minutes"] > 0]
+        fig = px.scatter(scat, x="minutes", y="goals_assists", color="position_primary",
+                          hover_name="player", hover_data=["team", "club"],
+                          title="Minutes Played vs Goal Contributions",
+                          color_discrete_sequence=COLOR_SEQ)
+        st.plotly_chart(style_fig(fig), use_container_width=True)
+
+    st.markdown("#### 🟨🟥 Discipline: Cards by Team")
+    cards_team = fdf.groupby("team")[["cards_yellow", "cards_red"]].sum().sort_values("cards_yellow", ascending=False).head(15)
+    fig = px.bar(cards_team, x=cards_team.index, y=["cards_yellow", "cards_red"], barmode="group",
+                 title="Yellow & Red Cards — Top 15 Teams", color_discrete_sequence=["#ffd54a", "#ff5252"])
+    st.plotly_chart(style_fig(fig, 400), use_container_width=True)
+
+# ---------------- TAB 2: PLAYER EXPLORER ----------------
+with tab2:
+    st.markdown("### Search & Inspect Individual Players")
+    label_lookup = fdf.sort_values("goals", ascending=False).drop_duplicates("player_label")
+    sel_label = st.selectbox("Choose a player to inspect", label_lookup["player_label"].tolist())
+    prow = fdf[fdf["player_label"] == sel_label].iloc[0]
+
+    cinfo, cchart = st.columns([1, 1.4])
+    with cinfo:
+        st.markdown(f"""
+        <div class="player-card">
+        <h3>{prow['player']}</h3>
+        <p style="color:#b9c4e6;">{prow['team']} · {prow['position']} · {prow['club']}</p>
+        <hr>
+        <p>🎂 <b>Age:</b> {prow['age_years']:.1f} years</p>
+        <p>⚽ <b>Goals:</b> {int(prow['goals'])} &nbsp; | &nbsp; 🎯 <b>Assists:</b> {int(prow['assists'])}</p>
+        <p>🥅 <b>Shots (on target):</b> {int(prow['shots'])} ({int(prow['shots_on_target'])})</p>
+        <p>🕒 <b>Minutes:</b> {int(prow['minutes']) if pd.notna(prow['minutes']) else 0} over {int(prow['games'])} games ({int(prow['games_starts'])} starts)</p>
+        <p>🟨 <b>Yellow / 🟥 Red:</b> {int(prow['cards_yellow'])} / {int(prow['cards_red'])}</p>
+        <p>🛡️ <b>Tackles Won / Interceptions:</b> {int(prow['tackles_won'])} / {int(prow['interceptions'])}</p>
+        </div>
+        """, unsafe_allow_html=True)
+
+    with cchart:
+        per90_metrics = ["goals_per90", "assists_per90", "shots_per90", "shots_on_target_per90"]
+        vals = prow[per90_metrics].fillna(0)
+        fig = px.bar(x=[m.replace("_per90", "").replace("_", " ").title() for m in per90_metrics],
+                     y=vals.values, title=f"{sel_label} — Per-90 Output",
+                     color=vals.values, color_continuous_scale="Plasma")
+        fig.update_layout(showlegend=False)
+        st.plotly_chart(style_fig(fig, 340), use_container_width=True)
+
+    st.markdown("#### All Players (filtered)")
+    show_cols = ["player", "team", "position", "club", "age_years", "games", "games_starts",
+                 "minutes", "goals", "assists", "goals_assists", "shots", "shots_on_target_pct",
+                 "cards_yellow", "cards_red", "tackles_won", "interceptions"]
+    st.dataframe(
+        fdf[show_cols].rename(columns={
+            "player": "Player", "team": "Team", "position": "Position", "club": "Club",
+            "age_years": "Age", "games": "Games", "games_starts": "Starts", "minutes": "Minutes",
+            "goals": "Goals", "assists": "Assists", "goals_assists": "G+A", "shots": "Shots",
+            "shots_on_target_pct": "SoT %", "cards_yellow": "Yellow", "cards_red": "Red",
+            "tackles_won": "Tackles Won", "interceptions": "Interceptions"
+        }).sort_values("Goals", ascending=False),
+        use_container_width=True, height=400
+    )
+
+# ---------------- TAB 3: TEAM COMPARISON ----------------
+with tab3:
+    st.markdown("### Compare Teams Head-to-Head")
+    all_teams = sorted(fdf["team"].unique())
+    default_teams = all_teams[:2] if len(all_teams) >= 2 else all_teams
+    chosen_teams = st.multiselect("Select teams to compare", all_teams, default=default_teams)
+
+    if chosen_teams:
+        team_stats = fdf[fdf["team"].isin(chosen_teams)].groupby("team").agg(
+            goals=("goals", "sum"), assists=("assists", "sum"),
+            shots=("shots", "sum"), shots_on_target=("shots_on_target", "sum"),
+            tackles_won=("tackles_won", "sum"), interceptions=("interceptions", "sum"),
+            cards_yellow=("cards_yellow", "sum"), cards_red=("cards_red", "sum"),
+            avg_age=("age_years", "mean"), squad_size=("player", "nunique"),
+        ).reset_index()
+
+        metrics = ["goals", "assists", "shots", "tackles_won", "interceptions"]
+        fig = go.Figure()
+        for i, t in enumerate(team_stats["team"]):
+            fig.add_trace(go.Bar(name=t, x=metrics,
+                                  y=team_stats.loc[team_stats["team"] == t, metrics].values.flatten(),
+                                  marker_color=COLOR_SEQ[i % len(COLOR_SEQ)]))
+        fig.update_layout(barmode="group", title="Team Metrics Comparison")
+        st.plotly_chart(style_fig(fig), use_container_width=True)
+
+        c1, c2 = st.columns(2)
+        with c1:
+            fig = px.bar(team_stats, x="team", y="avg_age", color="team",
+                         title="Average Squad Age", color_discrete_sequence=COLOR_SEQ)
+            st.plotly_chart(style_fig(fig), use_container_width=True)
+        with c2:
+            fig = px.bar(team_stats, x="team", y=["cards_yellow", "cards_red"], barmode="group",
+                         title="Discipline: Cards by Team", color_discrete_sequence=["#ffd54a", "#ff5252"])
+            st.plotly_chart(style_fig(fig), use_container_width=True)
+
+        st.dataframe(team_stats, use_container_width=True)
+    else:
+        st.info("Select at least one team above to see comparisons.")
+
+# ---------------- TAB 4: LEADERBOARDS ----------------
+with tab4:
+    st.markdown("### 🏅 Player Leaderboards")
+    lb_options = {
+        "Goals": "goals", "Assists": "assists", "Goals + Assists": "goals_assists",
+        "Shots": "shots", "Shots on Target %": "shots_on_target_pct",
+        "Tackles Won": "tackles_won", "Interceptions": "interceptions",
+        "Crosses": "crosses", "Fouled": "fouled", "Yellow Cards": "cards_yellow",
+        "Goals per 90": "goals_per90", "Assists per 90": "assists_per90",
+    }
+    lb_label = st.selectbox("Rank players by:", list(lb_options.keys()))
+    lb_metric = lb_options[lb_label]
+
+    lb = fdf[["player", "team", "position", lb_metric]].dropna(subset=[lb_metric])
+    lb = lb.sort_values(lb_metric, ascending=False).head(15)
+
+    fig = px.bar(lb, x=lb_metric, y="player", orientation="h", color=lb_metric,
+                 color_continuous_scale="Plasma", title=f"Top 15 Players by {lb_label}",
+                 hover_data=["team", "position"])
+    fig.update_yaxes(categoryorder="total ascending")
+    st.plotly_chart(style_fig(fig, 500), use_container_width=True)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### 🅿️ Most Minutes Played")
+        mins = fdf.sort_values("minutes", ascending=False)[["player", "team", "minutes"]].head(10)
+        st.dataframe(mins.reset_index(drop=True), use_container_width=True)
+    with c2:
+        st.markdown("##### 🟥 Cards (Yellow + Red)")
+        fdf["total_cards"] = fdf["cards_yellow"] + fdf["cards_red"] * 2
+        cards = fdf.sort_values("total_cards", ascending=False)[["player", "team", "cards_yellow", "cards_red"]].head(10)
+        st.dataframe(cards.reset_index(drop=True), use_container_width=True)
+
+# ---------------- TAB 5: GOALKEEPERS & RADAR ----------------
+with tab5:
+    st.markdown("### 🧤 Goalkeeper Performance")
+    gk_df = fdf[fdf["is_goalkeeper"] & (fdf["gk_games"] > 0)].copy()
+
+    if not gk_df.empty:
+        c1, c2 = st.columns(2)
+        with c1:
+            top_gk = gk_df.sort_values("gk_save_pct", ascending=False).head(10)
+            fig = px.bar(top_gk, x="gk_save_pct", y="player", orientation="h", color="gk_save_pct",
+                         color_continuous_scale="Teal", title="Top 10 Goalkeepers by Save %",
+                         hover_data=["team"])
+            fig.update_yaxes(categoryorder="total ascending")
+            st.plotly_chart(style_fig(fig), use_container_width=True)
+        with c2:
+            top_cs = gk_df.sort_values("gk_clean_sheets", ascending=False).head(10)
+            fig = px.bar(top_cs, x="gk_clean_sheets", y="player", orientation="h", color="gk_clean_sheets",
+                         color_continuous_scale="Blues", title="Top 10 Goalkeepers by Clean Sheets",
+                         hover_data=["team"])
+            fig.update_yaxes(categoryorder="total ascending")
+            st.plotly_chart(style_fig(fig), use_container_width=True)
+
+        st.dataframe(
+            gk_df[["player", "team", "gk_games", "gk_minutes", "gk_goals_against", "gk_saves",
+                   "gk_save_pct", "gk_clean_sheets", "gk_wins", "gk_ties", "gk_losses"]]
+            .sort_values("gk_save_pct", ascending=False).reset_index(drop=True),
+            use_container_width=True
+        )
+    else:
+        st.info("No goalkeeper data available for the current filters.")
+
+    st.markdown("---")
+    st.markdown("### 🕸️ Multi-Player Radar Comparison (Outfield)")
+    outfield = fdf[~fdf["is_goalkeeper"]]
+    outfield_labels = outfield.drop_duplicates("player_label")
+    radar_players = st.multiselect(
+        "Pick up to 4 outfield players", sorted(outfield_labels["player_label"].tolist()), max_selections=4,
+        default=list(outfield_labels.sort_values("goals", ascending=False)["player_label"].head(2))
+    )
+
+    radar_raw_metrics = ["goals_per90", "assists_per90", "shots_per90", "tackles_won", "interceptions", "crosses"]
+    if radar_players:
+        # normalize each metric to 0-100 scale (percentile within filtered outfield players) for fair comparison
+        norm_df = outfield.copy()
+        for m in radar_raw_metrics:
+            mn, mx = norm_df[m].min(), norm_df[m].max()
+            norm_df[m + "_norm"] = 0 if mx == mn else (norm_df[m] - mn) / (mx - mn) * 100
+
+        fig = go.Figure()
+        for i, p in enumerate(radar_players):
+            prow = norm_df[norm_df["player_label"] == p][[m + "_norm" for m in radar_raw_metrics]].mean()
+            fig.add_trace(go.Scatterpolar(
+                r=prow.values, theta=[m.replace("_per90", " /90").replace("_", " ").title() for m in radar_raw_metrics],
+                fill="toself", name=p, line_color=COLOR_SEQ[i % len(COLOR_SEQ)]
+            ))
+        fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100],
+                                                       gridcolor="rgba(255,255,255,0.1)")),
+                          title="Player Profile Comparison (percentile-normalized)", showlegend=True)
+        st.plotly_chart(style_fig(fig, 550), use_container_width=True)
+    else:
+        st.info("Select at least one outfield player to display the radar chart.")
 
 st.markdown("---")
-
-# ---------------------------------------------------------------------------
-# Tabs
-# ---------------------------------------------------------------------------
-
-tab_leaderboards, tab_teams, tab_positions, tab_player, tab_correlations = st.tabs(
-    ["🏆 Leaderboards", "🌍 Teams", "📊 Positions & Age", "🔎 Player Explorer", "🔗 Correlations"]
-)
-
-# --- Leaderboards -----------------------------------------------------------
-with tab_leaderboards:
-    top_n = st.slider("Show top N", 5, 25, 10, key="leaderboard_top_n")
-
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Top Goal Scorers")
-        scorers = analysis.top_scorers(filtered_summary, n=top_n)
-        fig = px.bar(
-            scorers, x="goals", y="player_name", color="team", orientation="h",
-            hover_data=["assists", "matches_played"], title=None,
-        )
-        fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(scorers, width='stretch', hide_index=True)
-
-    with col2:
-        st.subheader("Top Assist Providers")
-        assisters = analysis.top_assisters(filtered_summary, n=top_n)
-        fig = px.bar(
-            assisters, x="assists", y="player_name", color="team", orientation="h",
-            hover_data=["goals", "matches_played"],
-        )
-        fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(assisters, width='stretch', hide_index=True)
-
-    col3, col4 = st.columns(2)
-
-    with col3:
-        st.subheader("Top Rated Players")
-        min_m = st.slider("Minimum matches for rating leaderboard", 1, 10, 3, key="rating_min_matches")
-        rated = analysis.top_rated_players(filtered_summary, n=top_n, min_matches=min_m)
-        fig = px.bar(
-            rated, x="player_rating", y="player_name", color="team", orientation="h",
-            hover_data=["matches_played"],
-        )
-        fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(rated, width='stretch', hide_index=True)
-
-    with col4:
-        st.subheader("Most Valuable Players")
-        valuable = analysis.most_valuable_players(filtered_summary, n=top_n)
-        fig = px.bar(
-            valuable, x="market_value_eur", y="player_name", color="team", orientation="h",
-            hover_data=["club_name"],
-        )
-        fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=450)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(valuable, width='stretch', hide_index=True)
-
-    st.subheader("🥇 Golden Boot Race")
-    race_n = st.slider("Number of players to track", 3, 10, 5, key="race_n")
-    race_df = analysis.golden_boot_race(filtered_raw, top_n=race_n)
-    if not race_df.empty:
-        fig = px.line(
-            race_df, x="match_date", y="cumulative_goals", color="player_name",
-            markers=True,
-        )
-        fig.update_layout(height=450, xaxis_title="Match Date", yaxis_title="Cumulative Goals")
-        st.plotly_chart(fig, width='stretch')
-    else:
-        st.info("Not enough match data in the current filter to draw the race chart.")
-
-# --- Teams --------------------------------------------------------------
-with tab_teams:
-    team_stats = analysis.team_summary(filtered_summary)
-
-    st.subheader("Team Comparison")
-    max_teams_available = len(team_stats)
-    if max_teams_available <= 1:
-        n_teams = max_teams_available
-        st.caption(f"Only {max_teams_available} team in the current filter — showing it below.")
-    else:
-        slider_max = min(30, max_teams_available)
-        slider_default = min(15, max_teams_available)
-        n_teams = st.slider("Number of teams to show", 1, slider_max, slider_default)
-    metric = st.selectbox(
-        "Metric",
-        ["total_goals", "total_assists", "avg_player_rating", "avg_pass_accuracy", "squad_market_value_eur"],
-        format_func=lambda c: c.replace("_", " ").title(),
-    )
-    subset = team_stats.sort_values(metric, ascending=False).head(n_teams)
-    fig = px.bar(subset, x=metric, y="team", orientation="h", color=metric, color_continuous_scale="Blues")
-    fig.update_layout(yaxis={"categoryorder": "total ascending"}, height=500, showlegend=False)
-    st.plotly_chart(fig, width='stretch')
-
-    st.subheader("Full Team Table")
-    st.dataframe(team_stats, width='stretch', hide_index=True)
-
-# --- Positions & Age ------------------------------------------------------
-with tab_positions:
-    col1, col2 = st.columns(2)
-
-    with col1:
-        st.subheader("Average Rating by Position")
-        pos_df = analysis.position_breakdown(filtered_summary)
-        fig = px.bar(pos_df, x="position", y="avg_rating", color="position", text="player_count")
-        fig.update_layout(height=450, showlegend=False)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(pos_df, width='stretch', hide_index=True)
-
-    with col2:
-        st.subheader("Average Rating by Age Group")
-        age_df = analysis.age_vs_performance(filtered_summary)
-        fig = px.bar(age_df, x="age_group", y="avg_rating", color="age_group", text="player_count")
-        fig.update_layout(height=450, showlegend=False)
-        st.plotly_chart(fig, width='stretch')
-        st.dataframe(age_df, width='stretch', hide_index=True)
-
-# --- Player Explorer --------------------------------------------------------
-with tab_player:
-    st.subheader("Player Explorer")
-    player_names = sorted(filtered_summary["player_name"].unique())
-    chosen = st.selectbox("Choose a player", player_names)
-
-    row = filtered_summary[filtered_summary["player_name"] == chosen].iloc[0]
-
-    info_cols = st.columns(4)
-    info_cols[0].metric("Team", row["team"])
-    info_cols[1].metric("Position", row["position"])
-    info_cols[2].metric("Age", int(row["age"]))
-    info_cols[3].metric("Matches Played", int(row["matches_played"]))
-
-    stat_cols = st.columns(4)
-    stat_cols[0].metric("Goals", int(row["goals"]))
-    stat_cols[1].metric("Assists", int(row["assists"]))
-    stat_cols[2].metric("Avg. Rating", f"{row['player_rating']:.2f}")
-    stat_cols[3].metric("Market Value (€)", f"{int(row['market_value_eur']):,}")
-
-    radar_metrics = [
-        "offensive_contribution", "defensive_contribution", "possession_impact",
-        "pressure_resistance", "creativity_score", "consistency_score",
-    ]
-    radar_values = [row[m] for m in radar_metrics]
-
-    fig = go.Figure()
-    fig.add_trace(go.Scatterpolar(
-        r=radar_values + [radar_values[0]],
-        theta=[m.replace("_", " ").title() for m in radar_metrics] + [radar_metrics[0].replace("_", " ").title()],
-        fill="toself",
-        name=chosen,
-    ))
-    fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), height=450, showlegend=False)
-    st.plotly_chart(fig, width='stretch')
-
-    st.markdown("##### Match-by-match log")
-    player_matches = filtered_raw[filtered_raw["player_name"] == chosen][
-        ["match_date", "opponent_team", "tournament_stage", "minutes_played", "goals", "assists", "player_rating"]
-    ].sort_values("match_date")
-    st.dataframe(player_matches, width='stretch', hide_index=True)
-
-# --- Correlations --------------------------------------------------------
-with tab_correlations:
-    st.subheader("Correlation Between Key Performance Metrics")
-    default_cols = [
-        "goals", "assists", "player_rating", "pass_accuracy",
-        "distance_covered_km", "market_value_eur", "creativity_score",
-    ]
-    numeric_cols = filtered_summary.select_dtypes("number").columns.tolist()
-    chosen_cols = st.multiselect("Metrics to include", numeric_cols, default=[c for c in default_cols if c in numeric_cols])
-
-    if len(chosen_cols) >= 2:
-        corr = analysis.correlation_matrix(filtered_summary, columns=chosen_cols)
-        fig = px.imshow(corr, text_auto=".2f", color_continuous_scale="RdBu_r", zmin=-1, zmax=1, aspect="auto")
-        fig.update_layout(height=550)
-        st.plotly_chart(fig, width='stretch')
-    else:
-        st.info("Select at least two metrics to see their correlation.")
+st.caption("⚽ World Cup 2026 Player Stats Dashboard · Built with Streamlit & Plotly")
